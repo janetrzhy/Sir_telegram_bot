@@ -8,7 +8,11 @@ from threading import Thread
 app = Flask(__name__)
 
 # ============ 环境变量检查 ============
-TG_TOKEN = os.environ.get["TELEGRAM_BOT_TOKEN"]
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TG_TOKEN:
+    print("🚨 [FATAL] 抓获现场：Render 的口袋里到底装了什么鬼东西？")
+    print(list(os.environ.keys())) 
+    raise ValueError("彻底找不到 Token，系统自爆！")
 TG_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 CLAUDE_KEY = os.environ["CLAUDE_API_KEY"]
 CLAUDE_URL = os.environ["CLAUDE_BASE_URL"]
