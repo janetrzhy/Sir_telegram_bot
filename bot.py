@@ -108,7 +108,9 @@ def call_claude(user_message, memory, history):
     result = resp.json()
     
     if "content" in result:
-        return result["content"][0]["text"].strip()
+        for block in result["content"]:
+            if block.get("type") == "text":
+                return block["text"].strip()
     elif "choices" in result:
         return result["choices"][0]["message"]["content"].strip()
     return None
