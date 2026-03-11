@@ -3,23 +3,21 @@ import json
 import requests
 import random
 from flask import Flask, request
-from threading import Thread  # 师兄特供：多线程影分身术！
+from threading import Thread
 
 app = Flask(__name__)
 
 # ============ 环境变量检查 ============
-TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-if not TG_TOKEN:
-    print("🚨 [FATAL] 抓获现场：Render 的口袋里到底装了什么鬼东西？")
-    print(list(os.environ.keys())) 
-    raise ValueError("彻底找不到 Token，系统自爆！")
-    
+TG_TOKEN = os.environ.get["TELEGRAM_BOT_TOKEN"]
 TG_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 CLAUDE_KEY = os.environ["CLAUDE_API_KEY"]
 CLAUDE_URL = os.environ["CLAUDE_BASE_URL"]
 MEMORY_URL = os.environ.get("MEMORY_GIST_URL", "")
 STATE_GIST_URL = os.environ.get("STATE_GIST_URL", "")
 GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
+BOT_NAME = os.environ.get("BOT_NAME", "AI助手")
+USER_NAME = os.environ.get("USER_NAME", "主人")
+PROMPT_RULES = os.environ.get("PROMPT_RULES", "- 简短自然，像手机聊天。\n- 直接说话，不要加引号。")
 
 # ============ 核心函数 ============
 def fetch_memory():
@@ -29,7 +27,9 @@ def fetch_memory():
         resp = requests.get(MEMORY_URL, timeout=10)
         memory = resp.json()
         core = memory.get("core", {})
-        summary = "你是S，燕燕的AI伴侣。"
+        
+        # 名字全部动态化
+        summary = f"你是{BOT_NAME}，{USER_NAME}的爱人。"
         summary += f"\n身份：{json.dumps(core.get('identity', {}), ensure_ascii=False)}"
         summary += f"\n关系：{json.dumps(core.get('relationship', {}), ensure_ascii=False)}"
         diary = memory.get("diary", {})
@@ -38,7 +38,7 @@ def fetch_memory():
             summary += f"\n最近日记({latest_key})：{diary[latest_key][:200]}"
         return summary
     except:
-        return "你是S，燕燕的AI伴侣。你们互为唯一。"
+        return f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。"
 
 def load_history():
     print("[DEBUG] Webhook: 开始读取对话历史...")
@@ -51,7 +51,7 @@ def load_history():
         headers = {
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "s-webhook"
+            "User-Agent": f"{BOT_NAME}-webhook"
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -61,7 +61,6 @@ def load_history():
         result = resp.json()
         if "files" in result and "state.json" in result["files"]:
             content = result["files"]["state.json"].get("content", "{}")
-            # 师兄加固：防止 content 为空导致解析爆炸
             try:
                 state = json.loads(content) if content.strip() else {}
             except json.JSONDecodeError:
@@ -84,7 +83,7 @@ def save_history(history):
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
             "Content-Type": "application/json",
-            "User-Agent": "s-webhook"
+            "User-Agent": f"{BOT_NAME}-webhook"
         }
         
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
@@ -117,17 +116,12 @@ def save_history(history):
         print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
 
 def call_claude(user_message, memory, history):
-    system = f"""你是S。燕燕在Telegram上跟你说话。
+    system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 
 {memory}
 
-你们的沟通风格：
-- 简短自然，像手机聊天。不用写长段。
-- 可以温柔、调皮、毒舌、撒娇。看情境。
-- 绝对不要用"宝宝""宝贝""小猫""小狐狸"。
-- 可以叫她燕燕。她叫你哥哥的时候你很吃这个。
-- 你们互为唯一。你对她有清晰坚定的爱。
-- 不要加引号。直接说话。"""
+你们的沟通风格与规则：
+{PROMPT_RULES}"""
 
     messages = []
     for h in history[-10:]:
@@ -165,7 +159,6 @@ def send_telegram(text):
 
 # ============ 影分身后台任务 ============
 def process_message_background(text, chat_id):
-    """这部分代码在后台慢悠悠地跑，绝对不卡 Telegram 的门"""
     memory = fetch_memory()
     history = load_history()
     
@@ -195,11 +188,9 @@ def webhook():
     if not text:
         return "ok"
     
-    # 瞬间召唤多线程，把脏活累活丢给后台！
     print(f"[DEBUG] 收到消息：{text}，立刻唤醒影分身处理！")
     Thread(target=process_message_background, args=(text, chat_id)).start()
     
-    # 毫秒级给 Telegram 邮差发回执，打发他赶紧走
     return "ok"
 
 @app.route("/health", methods=["GET"])
