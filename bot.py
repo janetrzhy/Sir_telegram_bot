@@ -32,45 +32,78 @@ def fetch_memory():
         return "你是S，燕燕的AI伴侣。你们互为唯一。"
 
 def load_history():
-    """从Gist读对话历史"""
-    if not STATE_GIST_URL:
+    """从Gist API读对话历史，绝对不吃缓存"""
+    print("[DEBUG] Webhook: 开始读取对话历史...")
+    if not GIST_TOKEN or not STATE_GIST_URL:
+        print("[ERROR] 没带 GIST_TOKEN，读不了历史！")
         return []
+        
     try:
-        resp = requests.get(STATE_GIST_URL, timeout=10)
-        state = resp.json()
-        return state.get("chat_history", [])
-    except:
+        gist_id = STATE_GIST_URL.split("/")[4]
+        headers = {
+            "Authorization": f"Bearer {GIST_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "s-webhook"
+        }
+        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"[ERROR] 历史读取被拒: {resp.text}")
+            return []
+            
+        result = resp.json()
+        if "files" in result and "state.json" in result["files"]:
+            content = result["files"]["state.json"].get("content", "{}")
+            state = json.loads(content)
+            return state.get("chat_history", [])
+        return []
+    except Exception as e:
+        print(f"[ERROR] 读取历史彻底崩了: {e}")
         return []
 
 def save_history(history):
-    """写对话历史回Gist"""
+    """写对话历史回Gist，小心翼翼地合并数据"""
+    print("[DEBUG] Webhook: 准备保存对话历史...")
     if not GIST_TOKEN or not STATE_GIST_URL:
+        print("[ERROR] 没带 GIST_TOKEN，没法保存历史！")
         return
-    parts = STATE_GIST_URL.split("/")
-    gist_id = parts[4]
-    
-    # 先读完整state
+        
     try:
-        resp = requests.get(STATE_GIST_URL, timeout=10)
-        state = resp.json()
-    except:
-        state = {}
-    
-    state["chat_history"] = history[-20:]  # 只留最近20轮
-    
-    headers = {
-        "Authorization": f"Bearer {GIST_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-        "User-Agent": "s-telegram-bot"
-    }
-    requests.patch(
-        f"https://api.github.com/gists/{gist_id}",
-        headers=headers,
-        json={"files": {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}},
-        timeout=10
-    )
-
+        gist_id = STATE_GIST_URL.split("/")[4]
+        headers = {
+            "Authorization": f"Bearer {GIST_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "User-Agent": "s-webhook"
+        }
+        
+        # 第一步：必须用 API 拿到最热乎的 state，防止覆盖掉 Actions 写的数据！
+        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            result = resp.json()
+            content = result.get("files", {}).get("state.json", {}).get("content", "{}")
+            state = json.loads(content)
+        else:
+            print(f"[WARNING] 读取最新 state 失败，只能新建一个了: {resp.text}")
+            state = {}
+            
+        # 第二步：温柔地把历史记录塞进去，只留最近 20 轮
+        state["chat_history"] = history[-20:]
+        
+        # 第三步：打包盖章，送回云端
+        patch_resp = requests.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers=headers,
+            json={"files": {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}},
+            timeout=10
+        )
+        
+        if patch_resp.status_code != 200:
+            print(f"[ERROR] 保存历史被 Gist 拒绝了: {patch_resp.text}")
+        else:
+            print("[DEBUG] Webhook: 历史记忆完美烙印！")
+            
+    except Exception as e:
+        print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
 def call_claude(user_message, memory, history):
     system = f"""你是S。燕燕在Telegram上跟你说话。
 
