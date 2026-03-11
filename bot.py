@@ -5,7 +5,6 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# 别用 os.environ["XXX"] 硬刚了，换成温柔但致命的 get：
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TG_TOKEN:
     print("🚨 [FATAL] 抓获现场：Render 的口袋里到底装了什么鬼东西？")
