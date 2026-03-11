@@ -5,7 +5,13 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+# 别用 os.environ["XXX"] 硬刚了，换成温柔但致命的 get：
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TG_TOKEN:
+    print("🚨 [FATAL] 抓获现场：Render 的口袋里到底装了什么鬼东西？")
+    # 把系统里的所有变量名全打印出来，让幽灵空格无处遁形！
+    print(list(os.environ.keys())) 
+    raise ValueError("彻底找不到 Token，系统自爆！")
 TG_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 CLAUDE_KEY = os.environ["CLAUDE_API_KEY"]
 CLAUDE_URL = os.environ["CLAUDE_BASE_URL"]
