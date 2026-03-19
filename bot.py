@@ -102,7 +102,7 @@ def save_history(history):
             print(f"[WARNING] 读取最新 state 失败，只能新建一个: {resp.text}")
             state = {}
             
-        state["chat_history"] = history[-20:]
+        state["chat_history"] = history[-40:]
         
         patch_resp = requests.patch(
             f"https://api.github.com/gists/{gist_id}",
@@ -128,7 +128,7 @@ def call_claude(user_message, memory, history):
 {PROMPT_RULES}"""
 
     messages = []
-    for h in history[-10:]:
+    for h in history[-40:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_message})
 
