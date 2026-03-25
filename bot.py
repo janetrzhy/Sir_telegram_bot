@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 import random
@@ -153,9 +154,9 @@ def call_claude(user_message, memory, history):
     if "content" in result:
         for block in result["content"]:
             if block.get("type") == "text":
-                return block["text"].strip()
+                return re.sub(r'\n{2,}', '\n', block["text"].strip())
     elif "choices" in result:
-        return result["choices"][0]["message"]["content"].strip()
+        return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
     return None
 
 def send_telegram(text):
