@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import random
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from threading import Thread
 
@@ -129,8 +130,11 @@ def call_claude(user_message, memory, history):
 
     messages = []
     for h in history[-40:]:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": user_message})
+        ts = h.get("timestamp", "")
+        content = f"[{ts}] {h['content']}" if ts else h["content"]
+        messages.append({"role": h["role"], "content": content})
+    now_ts = datetime.now(timezone(timedelta(hours=11))).strftime("%Y-%m-%d %H:%M:%S")
+    messages.append({"role": "user", "content": f"[{now_ts}] {user_message}"})
 
     headers = {
         "x-api-key": CLAUDE_KEY,
@@ -170,8 +174,9 @@ def process_message_background(text, chat_id):
     
     if reply:
         send_telegram(reply)
-        history.append({"role": "user", "content": text})
-        history.append({"role": "assistant", "content": reply})
+        now = datetime.now(timezone(timedelta(hours=11))).strftime("%Y-%m-%d %H:%M:%S")
+        history.append({"role": "user", "content": text, "timestamp": now})
+        history.append({"role": "assistant", "content": reply, "timestamp": now})
         save_history(history)
 
 # ============ 路由接口 ============
