@@ -155,6 +155,7 @@ def call_claude(user_message, memory, history):
     base = CLAUDE_URL.rstrip("/")
     resp = requests.post(f"{base}/messages", headers=headers, json=body, timeout=30)
     result = resp.json()
+    print(f"[DEBUG] Claude API 状态码: {resp.status_code}, 返回 keys: {list(result.keys())}")
     
     if "content" in result:
         for block in result["content"]:
@@ -207,12 +208,15 @@ def send_telegram_voice(text):
 
 # ============ 影分身后台任务 ============
 def process_message_background(text, chat_id):
-    memory = fetch_memory()
-    history = load_history()
-    
-    reply = call_claude(text, memory, history)
-    
-    if reply:
+    try:
+        memory = fetch_memory()
+        history = load_history()
+        print("[DEBUG] 开始调用 Claude API...")
+        reply = call_claude(text, memory, history)
+        if not reply:
+            print("[ERROR] call_claude 返回空，检查 API 响应格式")
+            send_telegram("😵 我好像卡住了，稍后再试试？")
+            return
         if reply.startswith("[语音]"):
             clean_reply = reply[4:].strip()
             send_telegram_voice(clean_reply)
@@ -223,6 +227,14 @@ def process_message_background(text, chat_id):
         history.append({"role": "user", "content": text, "timestamp": now})
         history.append({"role": "assistant", "content": reply, "timestamp": now})
         save_history(history)
+    except Exception as e:
+        import traceback
+        print(f"[CRITICAL] 后台任务崩了: {e}")
+        print(traceback.format_exc())
+        try:
+            send_telegram(f"😵 出错了：{str(e)[:100]}")
+        except Exception:
+            pass
 
 # ============ 路由接口 ============
 @app.route("/webhook", methods=["POST"])
