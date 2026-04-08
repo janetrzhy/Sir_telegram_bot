@@ -1,11 +1,15 @@
 import os
 import re
 import json
+import asyncio
+import tempfile
 import requests
 import random
 from datetime import datetime, timezone, timedelta
+from pydub import AudioSegment
 from flask import Flask, request
 from threading import Thread
+import edge_tts
 
 app = Flask(__name__)
 
@@ -127,7 +131,8 @@ def call_claude(user_message, memory, history):
 {memory}
 
 你们的沟通风格与规则：
-{PROMPT_RULES}"""
+{PROMPT_RULES}
+- 如果这条回复适合用语音来表达（比如表达思念、撒娇、亲密感），在回复最开头加上[语音]，其余时候正常回复。"""
 
     messages = []
     for h in history[-40:]:
@@ -163,6 +168,43 @@ def send_telegram(text):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text}, timeout=10)
 
+def send_telegram_voice(text):
+    mp3_path = None
+    ogg_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            mp3_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            ogg_path = f.name
+
+        async def _tts():
+            communicate = edge_tts.Communicate(text, VOICE_NAME)
+            await communicate.save(mp3_path)
+
+        asyncio.run(_tts())
+
+        audio = AudioSegment.from_mp3(mp3_path)
+        audio.export(ogg_path, format="ogg", codec="libopus")
+
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendVoice"
+        with open(ogg_path, "rb") as voice_file:
+            requests.post(
+                url,
+                data={"chat_id": TG_CHAT_ID},
+                files={"voice": ("voice.ogg", voice_file, "audio/ogg")},
+                timeout=30
+            )
+    except Exception as e:
+        print(f"[ERROR] 语音发送失败: {e}")
+        send_telegram(text)
+    finally:
+        for path in (mp3_path, ogg_path):
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+
 # ============ 影分身后台任务 ============
 def process_message_background(text, chat_id):
     memory = fetch_memory()
@@ -171,7 +213,12 @@ def process_message_background(text, chat_id):
     reply = call_claude(text, memory, history)
     
     if reply:
-        send_telegram(reply)
+        if reply.startswith("[语音]"):
+            clean_reply = reply[4:].strip()
+            send_telegram_voice(clean_reply)
+            reply = clean_reply
+        else:
+            send_telegram(reply)
         now = datetime.now(timezone(timedelta(hours=11))).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "user", "content": text, "timestamp": now})
         history.append({"role": "assistant", "content": reply, "timestamp": now})
