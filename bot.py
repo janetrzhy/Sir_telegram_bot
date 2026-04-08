@@ -29,7 +29,7 @@ GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
 BOT_NAME = os.environ.get("BOT_NAME", "AI助手")
 USER_NAME = os.environ.get("USER_NAME", "主人")
 PROMPT_RULES = os.environ.get("PROMPT_RULES", " 简短自然，像手机聊天。直接说话，不要加引号。")
-VOICE_NAME = os.environ.get("VOICE_NAME", "zh-CN-YunxiNeural") # 可以换成你喜欢的edge_tts音色
+VOICE_NAME = os.environ.get("VOICE_NAME", "zh-CN-YunxiNeural")
 
 # ============ 核心函数 ============
 def fetch_memory():
@@ -181,13 +181,7 @@ def send_telegram_voice(text):
             ogg_path = f.name
 
         async def _tts():
-            # 加上魔法香料的版本，注意 rate 和 pitch 必须是带单位的字符串！
-            communicate = edge_tts.Communicate(
-                text=text, 
-                voice=VOICE_NAME, 
-                rate="-10%",   # 语速放慢10%，带出慵懒感
-                pitch="-5Hz"   # 音调压低5Hz，增加磁性共鸣
-            )
+            communicate = edge_tts.Communicate(text, VOICE_NAME, rate="-10%", pitch="-5Hz")
             await communicate.save(mp3_path)
 
         asyncio.run(_tts())
