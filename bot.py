@@ -30,6 +30,7 @@ BOT_NAME = os.environ.get("BOT_NAME", "AI助手")
 USER_NAME = os.environ.get("USER_NAME", "主人")
 PROMPT_RULES = os.environ.get("PROMPT_RULES", " 简短自然，像手机聊天。直接说话，不要加引号。")
 VOICE_NAME = os.environ.get("VOICE_NAME", "zh-CN-YunxiNeural")
+VOICE_NAME_EN = os.environ.get("VOICE_NAME_EN", "en-US-AndrewMultilingualNeural")
 
 # ============ 核心函数 ============
 def fetch_memory():
@@ -167,6 +168,13 @@ def call_claude(user_message, memory, history):
         return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
     return None
 
+def detect_voice(text):
+    ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
+    total_letters = sum(1 for c in text if c.isalpha())
+    if total_letters > 0 and ascii_letters / total_letters > 0.6:
+        return VOICE_NAME_EN
+    return VOICE_NAME
+
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text}, timeout=10)
@@ -181,7 +189,8 @@ def send_telegram_voice(text):
             ogg_path = f.name
 
         async def _tts():
-            communicate = edge_tts.Communicate(text, VOICE_NAME, rate="-10%", pitch="-5Hz")
+            voice = detect_voice(text)
+            communicate = edge_tts.Communicate(text, voice, rate="-10%", pitch="-5Hz")
             await communicate.save(mp3_path)
 
         asyncio.run(_tts())
