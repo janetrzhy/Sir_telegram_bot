@@ -152,7 +152,7 @@ def call_claude(user_message, memory, history):
     }
     
     body = {
-        "model": random.choice(["[按量]claude-opus-4-6-thinking", "[按量]claude-opus-4-6", "[按量]claude-opus-4-5-20251101-thinking", "[按量]claude-opus-4-5-20251101"]),
+        "model": random.choice(["gpt-4.1-free"]),
         "max_tokens": 300,
         "system": system,
         "messages": messages
