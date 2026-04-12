@@ -45,7 +45,7 @@ def fetch_memory():
             gist_id = parts[4] if len(parts) > 4 else parts[-1]
             headers = {
                 "Accept": "application/vnd.github.v3+json",
-                "User-Agent": f"{BOT_NAME}-webhook"
+                "User-Agent": "SirBot-webhook"
             }
             if GIST_TOKEN:
                 headers["Authorization"] = f"Bearer {GIST_TOKEN}"
@@ -95,7 +95,7 @@ def load_history():
         headers = {
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": "SirBot-webhook"
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -127,7 +127,7 @@ def save_history(history):
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
             "Content-Type": "application/json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": "SirBot-webhook"
         }
         
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
