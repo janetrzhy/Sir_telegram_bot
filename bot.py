@@ -137,38 +137,33 @@ def call_claude(user_message, memory, history):
 {PROMPT_RULES}
 - 如果这条回复适合用语音来表达（比如表达思念、撒娇、亲密感），在回复最开头加上[语音]，其余时候正常回复。"""
 
-    messages = []
+    messages = [{"role": "system", "content": system}]
     for h in history[-40:]:
-        msg = {"role": h["role"], "content": h["content"]}
-        if h.get("timestamp"):
-            msg["timestamp"] = h["timestamp"]
-        messages.append(msg)
+        messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_message})
 
     headers = {
-        "x-api-key": CLAUDE_KEY,
-        "content-type": "application/json",
-        "anthropic-version": "2023-06-01"
+        "Authorization": f"Bearer {CLAUDE_KEY}",
+        "Content-Type": "application/json"
     }
-    
+
     body = {
         "model": random.choice(["gpt-4.1-free"]),
         "max_tokens": 300,
-        "system": system,
         "messages": messages
     }
-    
+
     base = CLAUDE_URL.rstrip("/")
-    resp = requests.post(f"{base}/messages", headers=headers, json=body, timeout=30)
+    resp = requests.post(f"{base}/chat/completions", headers=headers, json=body, timeout=30)
     result = resp.json()
     print(f"[DEBUG] Claude API 状态码: {resp.status_code}, 返回 keys: {list(result.keys())}")
-    
-    if "content" in result:
+
+    if "choices" in result:
+        return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
+    elif "content" in result:
         for block in result["content"]:
             if block.get("type") == "text":
                 return re.sub(r'\n{2,}', '\n', block["text"].strip())
-    elif "choices" in result:
-        return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
     return None
 
 def detect_voice(text):
