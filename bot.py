@@ -31,6 +31,10 @@ USER_NAME = os.environ.get("USER_NAME", "主人")
 PROMPT_RULES = os.environ.get("PROMPT_RULES", " 简短自然，像手机聊天。直接说话，不要加引号。")
 VOICE_NAME = os.environ.get("VOICE_NAME", "zh-CN-YunxiNeural")
 VOICE_NAME_EN = os.environ.get("VOICE_NAME_EN", "en-US-AndrewMultilingualNeural")
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+MINIMAX_GROUP_ID = os.environ.get("MINIMAX_GROUP_ID", "")
+MINIMAX_VOICE_ID = os.environ.get("MINIMAX_VOICE_ID", "")
+MEMORY_FILENAME = os.environ.get("MEMORY_FILENAME", "Sir notion memory.json")
 
 # ============ 核心函数 ============
 def fetch_memory():
@@ -39,10 +43,13 @@ def fetch_memory():
         print("[DEBUG] MEMORY_GIST_URL 未设置，使用默认记忆")
         return fallback
     try:
-        if "gist.github.com" in MEMORY_URL and "/raw/" not in MEMORY_URL:
-            # Gist 页面 URL：通过 GitHub API 读取文件内容
+        # 统一走 GitHub API：支持 gist.github.com 和 gist.githubusercontent.com
+        if "github.com" in MEMORY_URL:
             parts = MEMORY_URL.rstrip("/").split("/")
+            # gist.github.com/user/ID → parts[4]
+            # gist.githubusercontent.com/user/ID/raw/... → parts[4]
             gist_id = parts[4] if len(parts) > 4 else parts[-1]
+            print(f"[DEBUG] Memory Gist ID: {gist_id}")
             headers = {
                 "Accept": "application/vnd.github.v3+json",
                 "User-Agent": "SirBot-webhook"
@@ -51,21 +58,24 @@ def fetch_memory():
                 headers["Authorization"] = f"Bearer {GIST_TOKEN}"
             resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
             if resp.status_code != 200:
-                print(f"[ERROR] Memory Gist 读取失败 {resp.status_code}: {resp.text[:100]}")
+                print(f"[ERROR] Memory Gist 读取失败 {resp.status_code}: {resp.text[:150]}")
                 return fallback
             result = resp.json()
-            content = None
-            for fname, fdata in result.get("files", {}).items():
-                if fname.endswith(".json"):
-                    content = fdata.get("content", "")
-                    print(f"[DEBUG] 读取 Memory 文件: {fname}")
-                    break
-            if not content:
-                print("[ERROR] Memory Gist 没有找到 JSON 文件")
+            all_files = list(result.get("files", {}).keys())
+            print(f"[DEBUG] Gist 包含文件: {all_files}")
+            # 优先精确匹配 MEMORY_FILENAME，找不到则取第一个 .json
+            files = result.get("files", {})
+            fdata = files.get(MEMORY_FILENAME) or next(
+                (v for k, v in files.items() if k.endswith(".json")), None
+            )
+            if not fdata:
+                print(f"[ERROR] Gist 里找不到 {MEMORY_FILENAME} 也没有其他 JSON 文件")
                 return fallback
+            content = fdata.get("content", "")
+            print(f"[DEBUG] 读取 Memory 文件: {fdata.get('filename', '?')}，{len(content)} 字节")
             memory = json.loads(content)
         else:
-            # 直链（raw gist 或其他直接 JSON URL）
+            # 非 GitHub URL：直接 GET
             resp = requests.get(MEMORY_URL, timeout=10)
             resp.raise_for_status()
             memory = resp.json()
@@ -210,6 +220,37 @@ def send_telegram(text):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text}, timeout=10)
 
+def _generate_minimax_audio(text, mp3_path):
+    url = f"https://api.minimax.chat/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}"
+    headers = {
+        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "model": "speech-01-hd",
+        "text": text,
+        "stream": False,
+        "voice_setting": {
+            "voice_id": MINIMAX_VOICE_ID,
+            "speed": 1.0,
+            "vol": 1.0,
+            "pitch": 0
+        },
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3"
+        }
+    }
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
+    result = resp.json()
+    status = result.get("base_resp", {}).get("status_code")
+    if status != 0:
+        raise Exception(f"MiniMax TTS 失败: {result.get('base_resp', {}).get('status_msg')}")
+    audio_hex = result["data"]["audio"]
+    with open(mp3_path, "wb") as f:
+        f.write(bytes.fromhex(audio_hex))
+
 def send_telegram_voice(text):
     mp3_path = None
     ogg_path = None
@@ -219,15 +260,19 @@ def send_telegram_voice(text):
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
             ogg_path = f.name
 
-        async def _tts():
-            voice = detect_voice(text)
-            if voice == VOICE_NAME_EN:
-                communicate = edge_tts.Communicate(text, voice, rate="-15%", pitch="-10Hz")
-            else:
-                communicate = edge_tts.Communicate(text, voice, rate="-15%", pitch="-20Hz")
-            await communicate.save(mp3_path)
-
-        asyncio.run(_tts())
+        is_english = detect_voice(text) == VOICE_NAME_EN
+        if is_english and MINIMAX_API_KEY and MINIMAX_GROUP_ID and MINIMAX_VOICE_ID:
+            # 英文用 MiniMax TTS
+            _generate_minimax_audio(text, mp3_path)
+        else:
+            # 中文（或未配置 MiniMax）用 edge_tts
+            async def _tts():
+                voice = detect_voice(text)
+                rate = "-15%"
+                pitch = "-10Hz" if voice == VOICE_NAME_EN else "-20Hz"
+                communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+                await communicate.save(mp3_path)
+            asyncio.run(_tts())
 
         audio = AudioSegment.from_mp3(mp3_path)
         audio.export(ogg_path, format="ogg", codec="libopus")
