@@ -34,14 +34,43 @@ VOICE_NAME_EN = os.environ.get("VOICE_NAME_EN", "en-US-AndrewMultilingualNeural"
 
 # ============ 核心函数 ============
 def fetch_memory():
+    fallback = f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。"
     if not MEMORY_URL:
-        return ""
+        print("[DEBUG] MEMORY_GIST_URL 未设置，使用默认记忆")
+        return fallback
     try:
-        resp = requests.get(MEMORY_URL, timeout=10)
-        memory = resp.json()
+        if "gist.github.com" in MEMORY_URL and "/raw/" not in MEMORY_URL:
+            # Gist 页面 URL：通过 GitHub API 读取文件内容
+            parts = MEMORY_URL.rstrip("/").split("/")
+            gist_id = parts[4] if len(parts) > 4 else parts[-1]
+            headers = {
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": f"{BOT_NAME}-webhook"
+            }
+            if GIST_TOKEN:
+                headers["Authorization"] = f"Bearer {GIST_TOKEN}"
+            resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+            if resp.status_code != 200:
+                print(f"[ERROR] Memory Gist 读取失败 {resp.status_code}: {resp.text[:100]}")
+                return fallback
+            result = resp.json()
+            content = None
+            for fname, fdata in result.get("files", {}).items():
+                if fname.endswith(".json"):
+                    content = fdata.get("content", "")
+                    print(f"[DEBUG] 读取 Memory 文件: {fname}")
+                    break
+            if not content:
+                print("[ERROR] Memory Gist 没有找到 JSON 文件")
+                return fallback
+            memory = json.loads(content)
+        else:
+            # 直链（raw gist 或其他直接 JSON URL）
+            resp = requests.get(MEMORY_URL, timeout=10)
+            resp.raise_for_status()
+            memory = resp.json()
+
         core = memory.get("core", {})
-        
-        # 名字全部动态化
         summary = f"你是{BOT_NAME}，{USER_NAME}的爱人。"
         summary += f"\n身份：{json.dumps(core.get('identity', {}), ensure_ascii=False)}"
         summary += f"\n关系：{json.dumps(core.get('relationship', {}), ensure_ascii=False)}"
@@ -49,9 +78,11 @@ def fetch_memory():
         if diary:
             latest_key = sorted(diary.keys())[-1]
             summary += f"\n最近日记({latest_key})：{diary[latest_key][:200]}"
+        print(f"[DEBUG] Memory 读取成功，{len(summary)} 字符")
         return summary
-    except:
-        return f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。"
+    except Exception as e:
+        print(f"[ERROR] Memory 读取失败: {e}")
+        return fallback
 
 def load_history():
     print("[DEBUG] Webhook: 开始读取对话历史...")
@@ -121,9 +152,9 @@ def save_history(history):
         )
         
         if patch_resp.status_code != 200:
-            print(f"[ERROR] 保存历史被 Gist 拒绝了: {patch_resp.text}")
+            print(f"[ERROR] 保存历史被 Gist 拒绝了 ({patch_resp.status_code}): {patch_resp.text[:200]}")
         else:
-            print("[DEBUG] Webhook: 历史记忆完美烙印！")
+            print(f"[DEBUG] 历史记忆完美烙印！共 {len(history)} 条")
             
     except Exception as e:
         print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
@@ -157,6 +188,8 @@ def call_claude(user_message, memory, history):
     resp = requests.post(f"{base}/chat/completions", headers=headers, json=body, timeout=30)
     result = resp.json()
     print(f"[DEBUG] Claude API 状态码: {resp.status_code}, 返回 keys: {list(result.keys())}")
+    if resp.status_code != 200:
+        print(f"[ERROR] API 错误响应: {str(result)[:300]}")
 
     if "choices" in result:
         return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
@@ -223,6 +256,7 @@ def process_message_background(text, chat_id):
     try:
         memory = fetch_memory()
         history = load_history()
+        print(f"[DEBUG] Memory 长度: {len(memory)} 字符，历史记录: {len(history)} 条")
         print("[DEBUG] 开始调用 Claude API...")
         reply = call_claude(text, memory, history)
         if not reply:
