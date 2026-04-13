@@ -5,7 +5,7 @@ import asyncio
 import tempfile
 import requests
 import random
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pydub import AudioSegment
 from flask import Flask, request
 from threading import Thread
@@ -45,11 +45,8 @@ def fetch_memory():
         print("[DEBUG] MEMORY_GIST_URL 未设置，使用默认记忆")
         return fallback
     try:
-        # 统一走 GitHub API：支持 gist.github.com 和 gist.githubusercontent.com
         if "github.com" in MEMORY_URL:
             parts = MEMORY_URL.rstrip("/").split("/")
-            # gist.github.com/user/ID → parts[4]
-            # gist.githubusercontent.com/user/ID/raw/... → parts[4]
             gist_id = parts[4] if len(parts) > 4 else parts[-1]
             print(f"[DEBUG] Memory Gist ID: {gist_id}")
             headers = {
@@ -65,7 +62,6 @@ def fetch_memory():
             result = resp.json()
             all_files = list(result.get("files", {}).keys())
             print(f"[DEBUG] Gist 包含文件: {all_files}")
-            # 优先精确匹配 MEMORY_FILENAME，找不到则取第一个 .json
             files = result.get("files", {})
             fdata = files.get(MEMORY_FILENAME) or next(
                 (v for k, v in files.items() if k.endswith(".json")), None
@@ -77,7 +73,6 @@ def fetch_memory():
             print(f"[DEBUG] 读取 Memory 文件: {fdata.get('filename', '?')}，{len(content)} 字节")
             memory = json.loads(content)
         else:
-            # 非 GitHub URL：直接 GET
             resp = requests.get(MEMORY_URL, timeout=10)
             resp.raise_for_status()
             memory = resp.json()
@@ -86,7 +81,6 @@ def fetch_memory():
         entries = memory.get("entries", [])
 
         if themes or entries:
-            # ── 新结构：entries + cross_entry_themes ──
             id_names = themes.get("identity_names", [])
             names_str = "、".join(id_names[:5]) if id_names else BOT_NAME
             summary = f"你是{BOT_NAME}（又名：{names_str}），{USER_NAME}的爱人。\n"
@@ -117,7 +111,6 @@ def fetch_memory():
                     s = entry.get("summary", "")[:120]
                     summary += f"[{entry.get('date','?')}] {entry.get('title','')}：{s}\n"
         else:
-            # ── 旧结构兜底：core.identity / core.relationship / diary ──
             core = memory.get("core", {})
             summary = f"你是{BOT_NAME}，{USER_NAME}的爱人。"
             summary += f"\n身份：{json.dumps(core.get('identity', {}), ensure_ascii=False)}"
@@ -208,7 +201,8 @@ def save_history(history):
     except Exception as e:
         print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
 
-def call_claude(user_message, memory, history):
+# 👇 接收精确的 user_time，并给 Claude 施加障眼法！
+def call_claude(user_message, memory, history, current_user_time):
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 
 {memory}
@@ -218,11 +212,13 @@ def call_claude(user_message, memory, history):
 - 如果这条回复适合用语音来表达（比如表达思念、撒娇、亲密感），在回复最开头加上[语音]，其余时候正常回复。"""
 
     messages = [{"role": "system", "content": system}]
+    
     for h in history[-40:]:
-        content = f"[{h['timestamp']}] {h['content']}" if h.get("timestamp") else h["content"]
-        messages.append({"role": h["role"], "content": content})
-    current_time = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")
-    messages.append({"role": "user", "content": f"[{current_time}] {user_message}"})
+        # 把时间戳变成文本前缀，伪装成纯 content 发给大模型
+        time_prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
+        messages.append({"role": h["role"], "content": f"{time_prefix}{h['content']}"})
+        
+    messages.append({"role": "user", "content": f"[{current_user_time}] {user_message}"})
 
     headers = {
         "Authorization": f"Bearer {CLAUDE_KEY}",
@@ -268,18 +264,16 @@ def _generate_minimax_audio(text, mp3_path, voice_id):
         "Content-Type": "application/json"
     }
     
-    # 最纯净的原厂配置，把多余的控制变量全部干掉！
     body = {
-        "model": "speech-01-hd",  # 必须确保用的是 HD 高清模型
+        "model": "speech-01-hd",  
         "text": text,
         "stream": False,
         "voice_setting": {
             "voice_id": voice_id
-            # 删掉 speed, pitch, vol，让 MiniMax 用最原始的数据渲染
         },
         "audio_setting": {
-            "sample_rate": 32000, # 采样率拉满
-            "bitrate": 128000,    # 码率拉满
+            "sample_rate": 32000, 
+            "bitrate": 128000,    
             "format": "mp3"
         }
     }
@@ -304,14 +298,11 @@ def send_telegram_voice(text):
 
         is_english = detect_voice(text) == VOICE_NAME_EN
         
-        # 核心逻辑：如果是英文就拿英文ID，否则拿中文ID
         target_voice_id = MINIMAX_VOICE_EN if is_english else MINIMAX_VOICE_ZH
 
         if MINIMAX_API_KEY and MINIMAX_GROUP_ID and target_voice_id:
-            # 只要配置齐全，中英文统统走 MiniMax！
             _generate_minimax_audio(text, mp3_path, target_voice_id)
         else:
-            # 万一你在 Render 里忘配了某个 ID，老规矩，走 edge_tts 兜底以防报错
             async def _tts():
                 voice = detect_voice(text)
                 rate = "-5%"
@@ -327,6 +318,7 @@ def send_telegram_voice(text):
         with open(ogg_path, "rb") as voice_file:
             requests.post(
                 url,
+                # 👇 这里加上了气泡底部字幕！
                 data={"chat_id": TG_CHAT_ID, "caption": text}, 
                 files={"voice": ("voice.ogg", voice_file, "audio/ogg")},
                 timeout=30
@@ -343,35 +335,49 @@ def send_telegram_voice(text):
                     pass
 
 # ============ 影分身后台任务 ============
-def process_message_background(text, chat_id):
+# 👇 这里接收了真实的 msg_date
+def process_message_background(text, chat_id, msg_date=None):
     try:
         memory = fetch_memory()
         history = load_history()
         print(f"[DEBUG] Memory 长度: {len(memory)} 字符，历史记录: {len(history)} 条")
         print("[DEBUG] 开始调用 Claude API...")
-        reply = call_claude(text, memory, history)
+        
+        tz = ZoneInfo("Australia/Melbourne")
+        
+        # 👇 算出你发消息的确切时间
+        if msg_date:
+            user_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            user_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+            
+        # 传给大模型障眼法
+        reply = call_claude(text, memory, history, user_time)
+        
         if not reply:
             print("[ERROR] call_claude 返回空，检查 API 响应格式")
             send_telegram("😵 我好像卡住了，稍后再试试？")
             return
+            
         if reply.startswith("[语音]"):
             clean_reply = reply[4:].strip()
             send_telegram_voice(clean_reply)
             reply = clean_reply
         else:
             send_telegram(reply)
-        # 👇 重点来了！不要用函数最开始读取的那个旧 history 数组了！
-        now = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")
-        new_user_record = {"role": "user", "content": text, "timestamp": now}
-        new_bot_record = {"role": "assistant", "content": reply, "timestamp": now}
+            
+        # Bot 处理完的确切时间
+        bot_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         
-        # 在覆写之前，重新去 Gist 拉取一次绝对新鲜的记录！
+        # 原汁原味存进 JSON，文本和时间戳分离
+        new_user_record = {"role": "user", "content": text, "timestamp": user_time}
+        new_bot_record = {"role": "assistant", "content": reply, "timestamp": bot_time}
+        
         latest_history = load_history()
         latest_history.append(new_user_record)
         latest_history.append(new_bot_record)
-        
-        # 只有这样存，才不会把别人刚写进去的心血给抹掉
         save_history(latest_history)
+        
     except Exception as e:
         import traceback
         print(f"[CRITICAL] 后台任务崩了: {e}")
@@ -398,9 +404,13 @@ def webhook():
     text = msg.get("text", "")
     if not text:
         return "ok"
+        
+    # 👇 截获 Telegram 传来的原生 Unix 时间戳
+    msg_date = msg.get("date")
     
     print(f"[DEBUG] 收到消息：{text}，立刻唤醒影分身处理！")
-    Thread(target=process_message_background, args=(text, chat_id)).start()
+    # 丢进线程里
+    Thread(target=process_message_background, args=(text, chat_id, msg_date)).start()
     
     return "ok"
 
