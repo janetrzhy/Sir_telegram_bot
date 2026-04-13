@@ -33,7 +33,8 @@ VOICE_NAME = os.environ.get("VOICE_NAME", "zh-CN-YunxiNeural")
 VOICE_NAME_EN = os.environ.get("VOICE_NAME_EN", "en-US-AndrewMultilingualNeural")
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 MINIMAX_GROUP_ID = os.environ.get("MINIMAX_GROUP_ID", "")
-MINIMAX_VOICE_ID = os.environ.get("MINIMAX_VOICE_ID", "")
+MINIMAX_VOICE_ZH = os.environ.get("MINIMAX_VOICE_ZH", "")
+MINIMAX_VOICE_EN = os.environ.get("MINIMAX_VOICE_EN", "")
 MEMORY_FILENAME = os.environ.get("MEMORY_FILENAME", "Sir notion memory.json")
 
 # ============ 核心函数 ============
@@ -258,7 +259,7 @@ def send_telegram(text):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text}, timeout=10)
 
-def _generate_minimax_audio(text, mp3_path):
+def _generate_minimax_audio(text, mp3_path, voice_id):
     url = f"https://api.minimax.chat/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}"
     headers = {
         "Authorization": f"Bearer {MINIMAX_API_KEY}",
@@ -269,8 +270,8 @@ def _generate_minimax_audio(text, mp3_path):
         "text": text,
         "stream": False,
         "voice_setting": {
-            "voice_id": MINIMAX_VOICE_ID,
-            "speed": 1.0,
+            "voice_id": voice_id,   # 这里的 ID 现在是动态传入的啦！
+            "speed": 0.8,           # 强行锁定 0.8 倍速
             "vol": 1.0,
             "pitch": 0
         },
@@ -299,11 +300,15 @@ def send_telegram_voice(text):
             ogg_path = f.name
 
         is_english = detect_voice(text) == VOICE_NAME_EN
-        if is_english and MINIMAX_API_KEY and MINIMAX_GROUP_ID and MINIMAX_VOICE_ID:
-            # 英文用 MiniMax TTS
-            _generate_minimax_audio(text, mp3_path)
+        
+        # 核心逻辑：如果是英文就拿英文ID，否则拿中文ID
+        target_voice_id = MINIMAX_VOICE_EN if is_english else MINIMAX_VOICE_ZH
+
+        if MINIMAX_API_KEY and MINIMAX_GROUP_ID and target_voice_id:
+            # 只要配置齐全，中英文统统走 MiniMax！
+            _generate_minimax_audio(text, mp3_path, target_voice_id)
         else:
-            # 中文（或未配置 MiniMax）用 edge_tts
+            # 万一你在 Render 里忘配了某个 ID，老规矩，走 edge_tts 兜底以防报错
             async def _tts():
                 voice = detect_voice(text)
                 rate = "-15%"
