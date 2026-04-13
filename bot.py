@@ -271,9 +271,9 @@ def _generate_minimax_audio(text, mp3_path, voice_id):
         "stream": False,
         "voice_setting": {
             "voice_id": voice_id,   # 这里的 ID 现在是动态传入的啦！
-            "speed": 0.8,           # 强行锁定 0.8 倍速
+            "speed": 0.9,           # 强行锁定 0.8 倍速
             "vol": 1.0,
-            "pitch": 0
+            "pitch": 1
         },
         "audio_setting": {
             "sample_rate": 32000,
