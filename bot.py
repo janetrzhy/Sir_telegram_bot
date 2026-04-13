@@ -226,7 +226,7 @@ def call_claude(user_message, memory, history, current_user_time):
     }
 
     body = {
-        "model": random.choice(["gpt-4.1-free"]),
+        "model": random.choice(["[按量]gpt-4.1"]),
         "max_tokens": 300,
         "messages": messages
     }
