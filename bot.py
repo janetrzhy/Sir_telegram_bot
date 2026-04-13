@@ -94,22 +94,27 @@ def call_claude(user_message, memory, history):
     system_prompt = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 背景记忆：{memory}
 规则：{PROMPT_RULES}
-- 对话中每条消息都带有时戳，请留意时间的先后顺序和当前时间。
+- 用户的每条消息前都带有发送时间，请根据时间推算上下文（例如是否隔了很久、是否是深夜）。
+- 你的回复【绝对不要】包含任何时间戳，直接说自然的话。
 - [语音] 标签必须放在回复最开头。"""
 
     messages = [{"role": "system", "content": system_prompt}]
-    # 把历史记录的时间戳揉进 content
-    for h in history:
-        ts = h.get("timestamp", "未知时间")
-        messages.append({"role": h["role"], "content": f"[{ts}] {h['content']}"})
     
-    # 加入当前正在发生的这一条
+    # 👇 师兄爆改：分角色处理！只给 user 加时间，assistant 保持绝对纯净！
+    for h in history:
+        if h["role"] == "user":
+            ts = h.get("timestamp", "未知时间")
+            messages.append({"role": "user", "content": f"[{ts}] {h['content']}"})
+        else:
+            messages.append({"role": "assistant", "content": h['content']})
+    
+    # 当前这条消息也只给 user 加
     current_ts = get_now_str()
     messages.append({"role": "user", "content": f"[{current_ts}] {user_message}"})
 
     headers = {"Authorization": f"Bearer {CLAUDE_KEY}", "Content-Type": "application/json"}
     body = {
-        "model": "gpt-4.1-free", # 或者你喜欢的模型名
+        "model": "gpt-4.1-free",
         "messages": messages,
         "temperature": 0.8
     }
