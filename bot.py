@@ -327,7 +327,7 @@ def send_telegram_voice(text):
         with open(ogg_path, "rb") as voice_file:
             requests.post(
                 url,
-                data={"chat_id": TG_CHAT_ID},
+                data={"chat_id": TG_CHAT_ID, "caption": text}, 
                 files={"voice": ("voice.ogg", voice_file, "audio/ogg")},
                 timeout=30
             )
