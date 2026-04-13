@@ -358,7 +358,7 @@ def process_message_background(text, chat_id):
             reply = clean_reply
         else:
             send_telegram(reply)
-        now = datetime.now(timezone(timedelta(hours=11))).strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "user", "content": text, "timestamp": now})
         history.append({"role": "assistant", "content": reply, "timestamp": now})
         save_history(history)
