@@ -311,8 +311,8 @@ def send_telegram_voice(text):
             # 万一你在 Render 里忘配了某个 ID，老规矩，走 edge_tts 兜底以防报错
             async def _tts():
                 voice = detect_voice(text)
-                rate = "-15%"
-                pitch = "-10Hz" if voice == VOICE_NAME_EN else "-20Hz"
+                rate = "-5%"
+                pitch = "-0Hz" if voice == VOICE_NAME_EN else "-0Hz"
                 communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
                 await communicate.save(mp3_path)
             asyncio.run(_tts())
