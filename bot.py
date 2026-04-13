@@ -221,7 +221,8 @@ def call_claude(user_message, memory, history):
     for h in history[-40:]:
         content = f"[{h['timestamp']}] {h['content']}" if h.get("timestamp") else h["content"]
         messages.append({"role": h["role"], "content": content})
-    messages.append({"role": "user", "content": user_message})
+    current_time = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")
+    messages.append({"role": "user", "content": f"[{current_time}] {user_message}"})
 
     headers = {
         "Authorization": f"Bearer {CLAUDE_KEY}",
@@ -359,10 +360,18 @@ def process_message_background(text, chat_id):
             reply = clean_reply
         else:
             send_telegram(reply)
+        # 👇 重点来了！不要用函数最开始读取的那个旧 history 数组了！
         now = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")
-        history.append({"role": "user", "content": text, "timestamp": now})
-        history.append({"role": "assistant", "content": reply, "timestamp": now})
-        save_history(history)
+        new_user_record = {"role": "user", "content": text, "timestamp": now}
+        new_bot_record = {"role": "assistant", "content": reply, "timestamp": now}
+        
+        # 在覆写之前，重新去 Gist 拉取一次绝对新鲜的记录！
+        latest_history = load_history()
+        latest_history.append(new_user_record)
+        latest_history.append(new_bot_record)
+        
+        # 只有这样存，才不会把别人刚写进去的心血给抹掉
+        save_history(latest_history)
     except Exception as e:
         import traceback
         print(f"[CRITICAL] 后台任务崩了: {e}")
