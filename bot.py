@@ -106,13 +106,13 @@ def fetch_memory():
             rituals = themes.get("recurring_rituals", [])
             if rituals:
                 summary += f"\n【固定仪式】\n"
-                for r in rituals[:4]:
+                for r in rituals:
                     summary += f"- {r}\n"
 
             if entries:
-                summary += f"\n【近期日记】\n"
-                for entry in entries[-2:]:
-                    s = entry.get("summary", "")[:120]
+                summary += f"\n【所有日记记录】\n"
+                for entry in entries:
+                    s = entry.get("summary", "")
                     summary += f"[{entry.get('date','?')}] {entry.get('title','')}：{s}\n"
         else:
             # ── 旧结构兜底：core.identity / core.relationship / diary ──
