@@ -76,51 +76,8 @@ def fetch_memory():
             resp.raise_for_status()
             content = resp.text
 
-        themes = memory.get("cross_entry_themes", {})
-        entries = memory.get("entries", [])
-
-        if themes or entries:
-            id_names = themes.get("identity_names", [])
-            names_str = "、".join(id_names[:5]) if id_names else BOT_NAME
-            summary = f"你是{BOT_NAME}（又名：{names_str}），{USER_NAME}的爱人。\n"
-
-            yanyan = themes.get("yanyan_profile", {})
-            if yanyan:
-                summary += f"\n【{USER_NAME}档案】\n"
-                for key, label in [("birthday","生辰"),("personality","性格"),
-                                    ("physical_note","特征"),("travel","旅行")]:
-                    if yanyan.get(key):
-                        summary += f"{label}：{yanyan[key]}\n"
-
-            milestones = themes.get("emotional_milestones", [])
-            if milestones:
-                summary += f"\n【关系里程碑】\n"
-                for m in milestones[-4:]:
-                    summary += f"- {m}\n"
-
-            rituals = themes.get("recurring_rituals", [])
-            if rituals:
-                summary += f"\n【固定仪式】\n"
-                for r in rituals[:4]:
-                    summary += f"- {r}\n"
-
-            if entries:
-                summary += f"\n【近期日记】\n"
-                for entry in entries[-2:]:
-                    s = entry.get("summary", "")[:120]
-                    summary += f"[{entry.get('date','?')}] {entry.get('title','')}：{s}\n"
-        else:
-            core = memory.get("core", {})
-            summary = f"你是{BOT_NAME}，{USER_NAME}的爱人。"
-            summary += f"\n身份：{json.dumps(core.get('identity', {}), ensure_ascii=False)}"
-            summary += f"\n关系：{json.dumps(core.get('relationship', {}), ensure_ascii=False)}"
-            diary = memory.get("diary", {})
-            if diary:
-                latest_key = sorted(diary.keys())[-1]
-                summary += f"\n最近日记({latest_key})：{diary[latest_key][:200]}"
-
-        print(f"[DEBUG] Memory 读取成功，{len(summary)} 字符")
-        return summary
+        print(f"[DEBUG] Memory 读取成功，{len(content)} 字符")
+        return content
     except Exception as e:
         print(f"[ERROR] Memory 读取失败: {e}")
         return fallback
@@ -204,6 +161,7 @@ def save_history(history):
 def call_claude(user_message, memory, history, current_user_time):
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 
+以下是你们关系的完整记忆档案，请完整读取并在对话中体现：
 {memory}
 
 你们的沟通风格与规则：
