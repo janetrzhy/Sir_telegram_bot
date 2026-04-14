@@ -204,6 +204,7 @@ def save_history(history):
 def call_claude(user_message, memory, history, current_user_time):
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 
+以下是你们关系的完整记忆档案，请完整读取并在对话中体现：
 {memory}
 
 你们的沟通风格与规则：
