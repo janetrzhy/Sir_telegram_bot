@@ -71,11 +71,10 @@ def fetch_memory():
                 return fallback
             content = fdata.get("content", "")
             print(f"[DEBUG] 读取 Memory 文件: {fdata.get('filename', '?')}，{len(content)} 字节")
-            memory = json.loads(content)
         else:
             resp = requests.get(MEMORY_URL, timeout=10)
             resp.raise_for_status()
-            memory = resp.json()
+            content = resp.text
 
         themes = memory.get("cross_entry_themes", {})
         entries = memory.get("entries", [])
