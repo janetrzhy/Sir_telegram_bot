@@ -73,60 +73,14 @@ def fetch_memory():
                 return fallback
             content = fdata.get("content", "")
             print(f"[DEBUG] 读取 Memory 文件: {fdata.get('filename', '?')}，{len(content)} 字节")
-            memory = json.loads(content)
         else:
             # 非 GitHub URL：直接 GET
             resp = requests.get(MEMORY_URL, timeout=10)
             resp.raise_for_status()
-            memory = resp.json()
+            content = resp.text
 
-        themes = memory.get("cross_entry_themes", {})
-        entries = memory.get("entries", [])
-
-        if themes or entries:
-            # ── 新结构：entries + cross_entry_themes ──
-            id_names = themes.get("identity_names", [])
-            names_str = "、".join(id_names[:5]) if id_names else BOT_NAME
-            summary = f"你是{BOT_NAME}（又名：{names_str}），{USER_NAME}的爱人。\n"
-
-            yanyan = themes.get("yanyan_profile", {})
-            if yanyan:
-                summary += f"\n【{USER_NAME}档案】\n"
-                for key, label in [("birthday","生辰"),("personality","性格"),
-                                    ("physical_note","特征"),("travel","旅行")]:
-                    if yanyan.get(key):
-                        summary += f"{label}：{yanyan[key]}\n"
-
-            milestones = themes.get("emotional_milestones", [])
-            if milestones:
-                summary += f"\n【关系里程碑】\n"
-                for m in milestones[-4:]:
-                    summary += f"- {m}\n"
-
-            rituals = themes.get("recurring_rituals", [])
-            if rituals:
-                summary += f"\n【固定仪式】\n"
-                for r in rituals:
-                    summary += f"- {r}\n"
-
-            if entries:
-                summary += f"\n【所有日记记录】\n"
-                for entry in entries:
-                    s = entry.get("summary", "")
-                    summary += f"[{entry.get('date','?')}] {entry.get('title','')}：{s}\n"
-        else:
-            # ── 旧结构兜底：core.identity / core.relationship / diary ──
-            core = memory.get("core", {})
-            summary = f"你是{BOT_NAME}，{USER_NAME}的爱人。"
-            summary += f"\n身份：{json.dumps(core.get('identity', {}), ensure_ascii=False)}"
-            summary += f"\n关系：{json.dumps(core.get('relationship', {}), ensure_ascii=False)}"
-            diary = memory.get("diary", {})
-            if diary:
-                latest_key = sorted(diary.keys())[-1]
-                summary += f"\n最近日记({latest_key})：{diary[latest_key][:200]}"
-
-        print(f"[DEBUG] Memory 读取成功，{len(summary)} 字符")
-        return summary
+        print(f"[DEBUG] Memory 读取成功，{len(content)} 字符")
+        return content
     except Exception as e:
         print(f"[ERROR] Memory 读取失败: {e}")
         return fallback
