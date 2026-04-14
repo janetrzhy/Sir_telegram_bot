@@ -39,123 +39,87 @@ MINIMAX_VOICE_EN = os.environ.get("MINIMAX_VOICE_EN", "")
 MEMORY_FILENAME = os.environ.get("MEMORY_FILENAME", "Sir notion memory.json")
 
 # ============ 核心函数 ============
+
+# 👇 师兄特制：无敌 ID 提取器 (管你填网址还是纯ID，统统切出核心码)
+def get_gist_id(url_or_id):
+    if not url_or_id: return None
+    return url_or_id.rstrip("/").split("/")[-1]
+
 def fetch_memory():
     fallback = f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。"
-    if not MEMORY_URL:
-        print("[DEBUG] MEMORY_GIST_URL 未设置，使用默认记忆")
-        return fallback
+    if not MEMORY_URL: return fallback
+    
+    gist_id = get_gist_id(MEMORY_URL)
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GIST_TOKEN: headers["Authorization"] = f"Bearer {GIST_TOKEN}"
+    
     try:
-        if "github.com" in MEMORY_URL:
-            parts = MEMORY_URL.rstrip("/").split("/")
-            gist_id = parts[4] if len(parts) > 4 else parts[-1]
-            print(f"[DEBUG] Memory Gist ID: {gist_id}")
-            headers = {
-                "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "SirBot-webhook"
-            }
-            if GIST_TOKEN:
-                headers["Authorization"] = f"Bearer {GIST_TOKEN}"
-            resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
-            if resp.status_code != 200:
-                print(f"[ERROR] Memory Gist 读取失败 {resp.status_code}: {resp.text[:150]}")
-                return fallback
-            result = resp.json()
-            all_files = list(result.get("files", {}).keys())
-            print(f"[DEBUG] Gist 包含文件: {all_files}")
-            files = result.get("files", {})
-            fdata = files.get(MEMORY_FILENAME) or next(
-                (v for k, v in files.items() if k.endswith(".json")), None
-            )
-            if not fdata:
-                print(f"[ERROR] Gist 里找不到 {MEMORY_FILENAME} 也没有其他 JSON 文件")
-                return fallback
-            content = fdata.get("content", "")
-            print(f"[DEBUG] 读取 Memory 文件: {fdata.get('filename', '?')}，{len(content)} 字节")
-        else:
-            resp = requests.get(MEMORY_URL, timeout=10)
-            resp.raise_for_status()
-            content = resp.text
-
-        print(f"[DEBUG] Memory 读取成功，{len(content)} 字符")
-        return content
+        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"[ERROR] Memory读取被拒 ({resp.status_code}): {resp.text[:100]}")
+            return fallback
+            
+        files = resp.json().get("files", {})
+        if not files: return fallback
+        
+        # 👇 师兄暴力破解：先找你指定的名字。如果找不到，闭着眼睛直接抓 Gist 里的第一个文件！管它后缀是什么！
+        fdata = files.get(MEMORY_FILENAME)
+        if not fdata:
+            first_file_key = list(files.keys())[0]
+            print(f"[DEBUG] 没找到指定文件名，强行抓取文件: {first_file_key}")
+            fdata = files[first_file_key]
+            
+        content = fdata.get("content", "")
+        print(f"[DEBUG] 🧠 Memory 读取成功！加载了 {len(content)} 字符。")
+        return content if content.strip() else fallback
     except Exception as e:
-        print(f"[ERROR] Memory 读取失败: {e}")
+        print(f"[ERROR] Memory 读取崩了: {e}")
         return fallback
 
 def load_history():
-    print("[DEBUG] Webhook: 开始读取对话历史...")
-    if not GIST_TOKEN or not STATE_GIST_URL:
-        print("[ERROR] 没带 GIST_TOKEN，读不了历史！")
-        return []
+    gist_id = get_gist_id(STATE_GIST_URL)
+    if not GIST_TOKEN or not gist_id: return []
         
     try:
-        gist_id = STATE_GIST_URL.split("/")[4]
-        headers = {
-            "Authorization": f"Bearer {GIST_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "SirBot-webhook"
-        }
+        headers = {"Authorization": f"Bearer {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
-        if resp.status_code != 200:
-            print(f"[ERROR] 历史读取被拒: {resp.text}")
-            return []
+        if resp.status_code != 200: return []
             
         result = resp.json()
-        if "files" in result and "state.json" in result["files"]:
-            content = result["files"]["state.json"].get("content", "{}")
-            try:
-                state = json.loads(content) if content.strip() else {}
-            except json.JSONDecodeError:
-                state = {}
-            return state.get("chat_history", [])
-        return []
+        content = result.get("files", {}).get("state.json", {}).get("content", "{}")
+        try:
+            return json.loads(content).get("chat_history", []) if content.strip() else []
+        except:
+            return []
     except Exception as e:
-        print(f"[ERROR] 读取历史彻底崩了: {e}")
+        print(f"[ERROR] 读取历史崩了: {e}")
         return []
 
 def save_history(history):
-    print("[DEBUG] Webhook: 准备保存对话历史...")
-    if not GIST_TOKEN or not STATE_GIST_URL:
-        print("[ERROR] 没带 GIST_TOKEN，没法保存历史！")
-        return
+    gist_id = get_gist_id(STATE_GIST_URL)
+    if not GIST_TOKEN or not gist_id: return
         
     try:
-        gist_id = STATE_GIST_URL.split("/")[4]
-        headers = {
-            "Authorization": f"Bearer {GIST_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-            "Content-Type": "application/json",
-            "User-Agent": "SirBot-webhook"
-        }
-        
+        headers = {"Authorization": f"Bearer {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+        state = {}
         if resp.status_code == 200:
-            result = resp.json()
-            content = result.get("files", {}).get("state.json", {}).get("content", "{}")
+            content = resp.json().get("files", {}).get("state.json", {}).get("content", "{}")
             try:
                 state = json.loads(content) if content.strip() else {}
-            except json.JSONDecodeError:
+            except:
                 state = {}
-        else:
-            print(f"[WARNING] 读取最新 state 失败，只能新建一个: {resp.text}")
-            state = {}
             
         state["chat_history"] = history[-40:]
         
-        patch_resp = requests.patch(
+        requests.patch(
             f"https://api.github.com/gists/{gist_id}",
             headers=headers,
             json={"files": {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}},
             timeout=10
         )
-        
-        if patch_resp.status_code != 200:
-            print(f"[ERROR] 保存历史被 Gist 拒绝了 ({patch_resp.status_code}): {patch_resp.text[:200]}")
-        else:
-            print(f"[DEBUG] 历史记忆完美烙印！共 {len(history)} 条")
-            
     except Exception as e:
-        print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
+        print(f"[ERROR] 保存历史遭遇打击: {e}")
 
 # 👇 接收精确的 user_time，并给 Claude 施加障眼法！
 def call_claude(user_message, memory, history, current_user_time):
