@@ -256,7 +256,7 @@ def send_telegram_voice(text):
                     pass
 
 # ============ 影分身后台任务 ============
-# 👇 这里接收了真实的 msg_date
+# ============ 影分身后台任务 ============
 def process_message_background(text, chat_id, msg_date=None):
     try:
         memory = fetch_memory()
@@ -266,7 +266,7 @@ def process_message_background(text, chat_id, msg_date=None):
         
         tz = ZoneInfo("Australia/Melbourne")
         
-        # 👇 算出你发消息的确切时间
+        # 算出你发消息的确切时间
         if msg_date:
             user_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S")
         else:
@@ -280,6 +280,9 @@ def process_message_background(text, chat_id, msg_date=None):
             send_telegram("😵 我好像卡住了，稍后再试试？")
             return
             
+        # 👇 师兄的物理切割：模型要是敢学人精加时间戳，直接一刀切掉！
+        reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
+            
         if reply.startswith("[语音]"):
             clean_reply = reply[4:].strip()
             send_telegram_voice(clean_reply)
@@ -290,7 +293,7 @@ def process_message_background(text, chat_id, msg_date=None):
         # Bot 处理完的确切时间
         bot_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         
-        # 原汁原味存进 JSON，文本和时间戳分离
+        # 原汁原味存进 JSON，文本和时间戳绝对分离！再也不会污染 content
         new_user_record = {"role": "user", "content": text, "timestamp": user_time}
         new_bot_record = {"role": "assistant", "content": reply, "timestamp": bot_time}
         
