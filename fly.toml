@@ -3,7 +3,7 @@ primary_region = "syd"
 
 [http_service]
 auto_start_machines = true
-auto_stop_machines = true
+auto_stop_machines = 'suspend'
 force_https = true
 internal_port = 10_000
 min_machines_running = 0
