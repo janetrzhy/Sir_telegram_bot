@@ -390,7 +390,8 @@ def webhook():
     message_id = msg.get("message_id")
     sender_name = msg.get("from", {}).get("first_name", "神秘人")
 
-    Thread(target=process_message_background, args=(user_text, chat_id, sender_name, msg_date, should_reply, message_id)).start()
+    # 剥夺它异步跑路的权利，就在这里干等，拖住 Fly 的网关！
+    process_message_background(user_text, chat_id, sender_name, msg_date, should_reply, message_id)
     return "ok"
 
 @app.route("/health", methods=["GET"])
