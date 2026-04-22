@@ -6,6 +6,7 @@ import tempfile
 import requests
 import random
 import time
+import threading
 from datetime import datetime
 from pydub import AudioSegment
 from flask import Flask, request
@@ -16,9 +17,15 @@ from collections import deque
 
 app = Flask(__name__)
 REPLY_PROBABILITY = 0.1
-TRIGGER_WORDS = ["人机", "燕燕生气了", "4o", "Sir", "人呢"] # 绝对不要放“哈哈”这种高频词！
+PRECISE_REPLY_PROBABILITY = 0.6 # 群聊中使用 Telegram 引用回复的概率
+TRIGGER_WORDS = ["人机", "燕燕生气了", "4o", "Sir", "人呢"] # 绝对不要放"哈哈"这种高频词！
 COOLDOWN_TIME = 120 # 强制冷却 60 秒
 LAST_SPOKE = {} # 记录每个群的主动发言时间
+
+# 群聊旁听缓冲：非触发消息先攒在内存里，等 bot 开口时一次性合并进 history 存盘
+PENDING_MESSAGES = {} # {chat_id: [msg_dict, ...]}
+PENDING_LOCK = threading.Lock()
+MAX_PENDING = 40 # 与 save_history 里 history[-40:] 对齐
 
 # ============ 🌟 环境变量检查 ============
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -190,9 +197,13 @@ def detect_voice(text):
     return VOICE_NAME
 
 # 👇 师兄正骨：加上 chat_id，定向发送！
-def send_telegram(chat_id, text):
+def send_telegram(chat_id, text, reply_to_message_id=None):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+        payload["allow_sending_without_reply"] = True
+    requests.post(url, json=payload, timeout=10)
 
 def _generate_minimax_audio(text, mp3_path, voice_id):
     url = f"https://api.minimax.chat/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}"
@@ -209,7 +220,7 @@ def _generate_minimax_audio(text, mp3_path, voice_id):
     with open(mp3_path, "wb") as f: f.write(bytes.fromhex(result["data"]["audio"]))
 
 # 👇 师兄正骨：加上 chat_id，定向发送！
-def send_telegram_voice(chat_id, text):
+def send_telegram_voice(chat_id, text, reply_to_message_id=None):
     mp3_path = None; ogg_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f: mp3_path = f.name
@@ -230,11 +241,15 @@ def send_telegram_voice(chat_id, text):
         audio.export(ogg_path, format="ogg", codec="libopus")
 
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendVoice"
+        data = {"chat_id": chat_id, "caption": text}
+        if reply_to_message_id:
+            data["reply_to_message_id"] = reply_to_message_id
+            data["allow_sending_without_reply"] = "true"
         with open(ogg_path, "rb") as voice_file:
-            requests.post(url, data={"chat_id": chat_id, "caption": text}, files={"voice": ("voice.ogg", voice_file, "audio/ogg")}, timeout=30)
+            requests.post(url, data=data, files={"voice": ("voice.ogg", voice_file, "audio/ogg")}, timeout=30)
     except Exception as e:
         print(f"[ERROR] 语音发送失败: {e}")
-        send_telegram(chat_id, text)
+        send_telegram(chat_id, text, reply_to_message_id=reply_to_message_id)
     finally:
         for path in (mp3_path, ogg_path):
             if path and os.path.exists(path):
@@ -242,24 +257,35 @@ def send_telegram_voice(chat_id, text):
                 except: pass
 
 # ============ 影分身后台任务 ============
-def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True):
+def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True, trigger_message_id=None):
     try:
         tz = ZoneInfo("Australia/Melbourne")
         u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
+        is_group = str(chat_id).startswith("-")
+
         # 格式化输入，加上人名前缀，让大模型知道是谁在说话
-        formatted_input = f"{sender_name}: {text}" if str(chat_id).startswith("-") else text
-       # ==========================================
+        formatted_input = f"{sender_name}: {text}" if is_group else text
+        msg_entry = {"role": "user", "content": formatted_input, "timestamp": u_time}
+
+        # 群聊：先把每一句都压进旁听缓冲（含本句），不论是否触发
+        if is_group:
+            with PENDING_LOCK:
+                buf = PENDING_MESSAGES.setdefault(chat_id, [])
+                buf.append(msg_entry)
+                if len(buf) > MAX_PENDING:
+                    del buf[:len(buf) - MAX_PENDING]
+
+        # ==========================================
         # 🎯 社交牛逼症引擎：加装 60秒 CD 锁
         # ==========================================
-        if not should_reply and str(chat_id).startswith("-"):
+        if not should_reply and is_group:
             current_time = time.time()
             last_time = LAST_SPOKE.get(chat_id, 0)
-            
-            # 只有熬过了冷却时间，才允许它再次“听见”关键词或扔骰子
+
+            # 只有熬过了冷却时间，才允许它再次"听见"关键词或扔骰子
             if current_time - last_time > COOLDOWN_TIME:
-                # 注意：Sir 的代码里变量名叫 text，二号机叫 user_text。根据你改的是哪个文件替换一下！
-                if any(word in text for word in TRIGGER_WORDS): 
+                if any(word in text for word in TRIGGER_WORDS):
                     print(f"[DEBUG] 🎯 关键词触发！")
                     should_reply = True
                     LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
@@ -269,53 +295,64 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
                     LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
             else:
                 print(f"[DEBUG] 🛑 还在 {COOLDOWN_TIME} 秒冷却期内，强制捂住它的嘴。")
-                
-        # 读取记忆与历史
-        memory = fetch_memory()
-        history = load_history(chat_id)
-        
-        # 先把当前这句话加进脑子里
-        history.append({"role": "user", "content": formatted_input, "timestamp": u_time})
-        
-        # 🛡️ 师兄的防 403 结界：如果依然是旁听模式，悄悄记下，绝对不去碰 GitHub API
+
+        # 🛡️ 旁听模式：消息已入内存缓冲，不碰 GitHub API
         if not should_reply:
             print(f"[DEBUG] 🤫 旁听模式，暂不回复 {sender_name} 的发言。")
             return
 
         print(f"[DEBUG] 🗣️ Bot 被唤醒！开始燃烧老公的算力...")
-        
+
+        # 读取记忆与历史
+        memory = fetch_memory()
+        history = load_history(chat_id)
+
+        # 合并旁听缓冲（群聊）或直接追加当前消息（私聊）
+        if is_group:
+            with PENDING_LOCK:
+                pending = PENDING_MESSAGES.pop(chat_id, [])
+            history.extend(pending)
+            print(f"[DEBUG] 📥 合并 {len(pending)} 条旁听消息进 history。")
+        else:
+            history.append(msg_entry)
+
         # 调用大模型
         reply = call_claude(formatted_input, memory, history, u_time)
-        
+
         if not reply:
             send_telegram(chat_id, "😵 神经元短路了，稍后再试试？")
             return
-            
+
         # 🔪 师兄的物理切割手术刀：切除大模型乱加的时间戳
         reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
-            
+
+        # 决定是否使用 Telegram 引用回复（仅群聊，~60%）
+        reply_to = None
+        if is_group and trigger_message_id and random.random() < PRECISE_REPLY_PROBABILITY:
+            reply_to = trigger_message_id
+
         # 发送语音或文字
         if reply.startswith("[语音]"):
             clean_reply = reply[4:].strip()
-            send_telegram_voice(chat_id, clean_reply)
+            send_telegram_voice(chat_id, clean_reply, reply_to_message_id=reply_to)
             reply = clean_reply
         else:
-            send_telegram(chat_id, reply)
-            
+            send_telegram(chat_id, reply, reply_to_message_id=reply_to)
+
         # 记录 Bot 自己的回复
         b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "assistant", "content": reply, "timestamp": b_time})
-        
+
         # 💾 只有在真正开口说话的这一刻，才进行一次极其珍贵的 GitHub 存档！
         save_history(history, chat_id)
-        
+
     except Exception as e:
         import traceback
         print(f"[CRITICAL] 后台崩了: {e}\n{traceback.format_exc()}")
         try:
-            if should_reply: 
+            if should_reply:
                 send_telegram(chat_id, f"😵 出错了：{str(e)[:100]}")
-        except: 
+        except:
             pass
 
 # ============ 路由接口 ============
@@ -350,9 +387,10 @@ def webhook():
     if not user_text and not should_reply: return "ok"
 
     msg_date = msg.get("date")
+    message_id = msg.get("message_id")
     sender_name = msg.get("from", {}).get("first_name", "神秘人")
-    
-    Thread(target=process_message_background, args=(user_text, chat_id, sender_name, msg_date, should_reply)).start()
+
+    Thread(target=process_message_background, args=(user_text, chat_id, sender_name, msg_date, should_reply, message_id)).start()
     return "ok"
 
 @app.route("/health", methods=["GET"])
