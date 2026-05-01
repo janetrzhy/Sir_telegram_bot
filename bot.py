@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+import base64
 import tempfile
 import requests
 import random
@@ -152,7 +153,7 @@ def save_history(history, chat_id):
     except Exception as e:
         print(f"[ERROR] 保存历史遭遇打击: {e}")
 
-def call_claude(user_message, memory, history, current_user_time):
+def call_claude(user_message, memory, history, current_user_time, image_data_url=None):
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 如果是群聊，消息前面会带有发言人的名字。
 
@@ -164,12 +165,19 @@ def call_claude(user_message, memory, history, current_user_time):
 - 如果这条回复适合用语音来表达（比如表达思念、撒娇、亲密感），在回复最开头加上[语音]，其余时候正常回复。"""
 
     messages = [{"role": "system", "content": system}]
-    
+
     for h in history[-40:]:
         time_prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
         messages.append({"role": h["role"], "content": f"{time_prefix}{h['content']}"})
-        
-    messages.append({"role": "user", "content": f"[{current_user_time}] {user_message}"})
+
+    user_text_block = f"[{current_user_time}] {user_message}"
+    if image_data_url:
+        messages.append({"role": "user", "content": [
+            {"type": "text", "text": user_text_block},
+            {"type": "image_url", "image_url": {"url": image_data_url}},
+        ]})
+    else:
+        messages.append({"role": "user", "content": user_text_block})
 
     headers = {"Authorization": f"Bearer {CLAUDE_KEY}", "Content-Type": "application/json"}
     body = {"model": random.choice(["[按量]gpt-4.1"]), "max_tokens": 300, "messages": messages}
@@ -195,6 +203,36 @@ def detect_voice(text):
     if total_letters > 0 and ascii_letters / total_letters > 0.6:
         return VOICE_NAME_EN
     return VOICE_NAME
+
+# 👇 拉取 Telegram 图片，转成 data URL 喂给多模态模型
+def download_telegram_image(file_id):
+    try:
+        meta = requests.get(
+            f"https://api.telegram.org/bot{TG_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10
+        )
+        if meta.status_code != 200:
+            print(f"[ERROR] getFile 失败 ({meta.status_code}): {meta.text[:120]}")
+            return None
+        file_path = meta.json().get("result", {}).get("file_path")
+        if not file_path: return None
+
+        blob = requests.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}", timeout=20)
+        if blob.status_code != 200:
+            print(f"[ERROR] 图片下载失败 ({blob.status_code})")
+            return None
+
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpg"
+        mime = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "webp": "image/webp", "gif": "image/gif"
+        }.get(ext, "image/jpeg")
+        b64 = base64.b64encode(blob.content).decode("ascii")
+        print(f"[DEBUG] 🖼️ 图片下载成功，{len(blob.content)} 字节，mime={mime}")
+        return f"data:{mime};base64,{b64}"
+    except Exception as e:
+        print(f"[ERROR] 下载图片崩了: {e}")
+        return None
 
 # 👇 师兄正骨：加上 chat_id，定向发送！
 def send_telegram(chat_id, text, reply_to_message_id=None):
@@ -257,15 +295,21 @@ def send_telegram_voice(chat_id, text, reply_to_message_id=None):
                 except: pass
 
 # ============ 影分身后台任务 ============
-def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True, trigger_message_id=None):
+def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True, trigger_message_id=None, image_data_url=None):
     try:
         tz = ZoneInfo("Australia/Melbourne")
         u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
         is_group = str(chat_id).startswith("-")
 
+        # 文本展示：纯图无 caption 时给个占位符；带图就在末尾标 [图片]
+        display_text = text or ("(发了张图)" if image_data_url else "")
+        if image_data_url:
+            display_text = f"{display_text} [图片]".strip()
+
         # 格式化输入，加上人名前缀，让大模型知道是谁在说话
-        formatted_input = f"{sender_name}: {text}" if is_group else text
+        formatted_input = f"{sender_name}: {display_text}" if is_group else display_text
+        # 历史里只存文本占位，不存 base64（防止撑爆 Gist）
         msg_entry = {"role": "user", "content": formatted_input, "timestamp": u_time}
 
         # 群聊：先把每一句都压进旁听缓冲（含本句），不论是否触发
@@ -316,8 +360,8 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         else:
             history.append(msg_entry)
 
-        # 调用大模型
-        reply = call_claude(formatted_input, memory, history, u_time)
+        # 调用大模型（带图就走多模态）
+        reply = call_claude(formatted_input, memory, history, u_time, image_data_url=image_data_url)
 
         if not reply:
             send_telegram(chat_id, "😵 神经元短路了，稍后再试试？")
@@ -372,26 +416,33 @@ def webhook():
     chat_id = str(msg.get("chat", {}).get("id", ""))
     
     if chat_id not in ALLOWED_IDS: return "ok"
-    
-    user_text = msg.get("text", "")
-    if not user_text: return "ok"
-    
-    # 群聊静音偷听逻辑
+
+    # 文字 / 图片(可带 caption) 都走同一条处理通道
+    user_text = msg.get("text", "") or msg.get("caption", "")
+    photos = msg.get("photo") or []
+    if not user_text and not photos: return "ok"
+
+    # 群聊静音偷听逻辑（@bot 决定是否唤醒；@ 检查针对 text/caption）
     should_reply = True
     if chat_id.startswith("-"):
         if BOT_USERNAME and f"@{BOT_USERNAME}" not in user_text:
             should_reply = False
         elif BOT_USERNAME:
             user_text = user_text.replace(f"@{BOT_USERNAME}", "").strip()
-            
-    if not user_text and not should_reply: return "ok"
+
+    # 图片下载放在 webhook 同步路径里没问题，Telegram 给 webhook 大约 60s 超时
+    image_data_url = None
+    if photos:
+        # photo 是按尺寸递增的列表，最后一个是最大分辨率
+        file_id = photos[-1].get("file_id")
+        if file_id:
+            image_data_url = download_telegram_image(file_id)
 
     msg_date = msg.get("date")
     message_id = msg.get("message_id")
     sender_name = msg.get("from", {}).get("first_name", "神秘人")
 
-    # 剥夺它异步跑路的权利，就在这里干等，拖住 Fly 的网关！
-    process_message_background(user_text, chat_id, sender_name, msg_date, should_reply, message_id)
+    Thread(target=process_message_background, args=(user_text, chat_id, sender_name, msg_date, should_reply, message_id, image_data_url)).start()
     return "ok"
 
 @app.route("/health", methods=["GET"])
