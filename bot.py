@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import html
 import asyncio
 import base64
 import signal
@@ -212,14 +213,15 @@ def flush_pending_if_due(chat_id):
 
 def call_claude(user_message, memory, history, current_user_time, image_data_url=None):
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
-如果是群聊，消息前面会带有发言人的名字。
+如果是群聊，消息前面会带有发言人的名字，格式是 名字(uid=数字ID): 内容。
 
 以下是你们关系的完整记忆档案，请完整读取并在对话中体现：
 {memory}
 
 你们的沟通风格与规则：
 {PROMPT_RULES}
-- 如果这条回复适合用语音来表达（比如表达思念、撒娇、亲密感），在回复最开头加上[语音]，其余时候正常回复。"""
+- 如果这条回复适合用语音来表达（比如表达思念、撒娇、亲密感），在回复最开头加上[语音]，其余时候正常回复。
+- 群聊里要 @ 某个用户时，用这种格式：[名字](tg://user?id=数字ID)，其中数字ID 来自上下文里 名字(uid=...) 的那个数字。例如要 @ 张三(uid=12345) 就写成 [张三](tg://user?id=12345)。不要在回复里写出 uid= 这种 raw 字串。"""
 
     messages = [{"role": "system", "content": system}]
 
@@ -291,14 +293,41 @@ def download_telegram_image(file_id):
         print(f"[ERROR] 下载图片崩了: {e}")
         return None
 
+# 👇 让模型用 [名字](tg://user?id=ID) 这种 markdown 写 mention，发送前转成 Telegram 的 HTML <a> 标签
+#    其余正文做 HTML 转义，避免 < > & 把消息搞挂
+MENTION_RE = re.compile(r'\[([^\]\n]+?)\]\(tg://user\?id=(\d+)\)')
+
+def render_html(text):
+    if not text: return ""
+    mentions = []
+    def stash(m):
+        idx = len(mentions)
+        mentions.append((m.group(1), m.group(2)))
+        return f"\x00MENTION_{idx}\x00"
+    stashed = MENTION_RE.sub(stash, text)
+    escaped = html.escape(stashed, quote=False)
+    def restore(m):
+        idx = int(m.group(1))
+        name, uid = mentions[idx]
+        return f'<a href="tg://user?id={uid}">{html.escape(name)}</a>'
+    return re.sub(r'\x00MENTION_(\d+)\x00', restore, escaped)
+
 # 👇 师兄正骨：加上 chat_id，定向发送！
 def send_telegram(chat_id, text, reply_to_message_id=None):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {"chat_id": chat_id, "text": render_html(text), "parse_mode": "HTML"}
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
         payload["allow_sending_without_reply"] = True
-    requests.post(url, json=payload, timeout=10)
+    r = requests.post(url, json=payload, timeout=10)
+    # HTML 解析失败兜底：去掉 parse_mode 重发原文
+    if r.status_code >= 400:
+        print(f"[WARN] HTML 发送失败 ({r.status_code}): {r.text[:200]}，回退纯文本")
+        plain = {"chat_id": chat_id, "text": text}
+        if reply_to_message_id:
+            plain["reply_to_message_id"] = reply_to_message_id
+            plain["allow_sending_without_reply"] = True
+        requests.post(url, json=plain, timeout=10)
 
 def _generate_minimax_audio(text, mp3_path, voice_id):
     url = f"https://api.minimax.chat/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}"
@@ -336,7 +365,7 @@ def send_telegram_voice(chat_id, text, reply_to_message_id=None):
         audio.export(ogg_path, format="ogg", codec="libopus")
 
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendVoice"
-        data = {"chat_id": chat_id, "caption": text}
+        data = {"chat_id": chat_id, "caption": render_html(text), "parse_mode": "HTML"}
         if reply_to_message_id:
             data["reply_to_message_id"] = reply_to_message_id
             data["allow_sending_without_reply"] = "true"
@@ -352,7 +381,7 @@ def send_telegram_voice(chat_id, text, reply_to_message_id=None):
                 except: pass
 
 # ============ 影分身后台任务 ============
-def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True, trigger_message_id=None, image_data_url=None):
+def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True, trigger_message_id=None, image_data_url=None, sender_id=None):
     try:
         tz = ZoneInfo("Australia/Melbourne")
         u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -364,8 +393,12 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         if image_data_url:
             display_text = f"{display_text} [图片]".strip()
 
-        # 格式化输入，加上人名前缀，让大模型知道是谁在说话
-        formatted_input = f"{sender_name}: {display_text}" if is_group else display_text
+        # 格式化输入：群聊带上 (uid=...)，让模型知道每个人的 ID 以便 @mention
+        if is_group:
+            sender_label = f"{sender_name}(uid={sender_id})" if sender_id else sender_name
+            formatted_input = f"{sender_label}: {display_text}"
+        else:
+            formatted_input = display_text
         # 历史里只存文本占位，不存 base64（防止撑爆 Gist）
         msg_entry = {"role": "user", "content": formatted_input, "timestamp": u_time}
 
@@ -523,9 +556,11 @@ def webhook():
 
     msg_date = msg.get("date")
     message_id = msg.get("message_id")
-    sender_name = msg.get("from", {}).get("first_name", "神秘人")
+    sender_from = msg.get("from", {}) or {}
+    sender_name = sender_from.get("first_name", "神秘人")
+    sender_id = sender_from.get("id")
 
-    Thread(target=process_message_background, args=(user_text, chat_id, sender_name, msg_date, should_reply, message_id, image_data_url)).start()
+    Thread(target=process_message_background, args=(user_text, chat_id, sender_name, msg_date, should_reply, message_id, image_data_url, sender_id)).start()
     return "ok"
 
 @app.route("/health", methods=["GET"])
