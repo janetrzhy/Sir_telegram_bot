@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import base64
+import signal
 import tempfile
 import requests
 import random
@@ -27,6 +28,13 @@ LAST_SPOKE = {} # 记录每个群的主动发言时间
 PENDING_MESSAGES = {} # {chat_id: [msg_dict, ...]}
 PENDING_LOCK = threading.Lock()
 MAX_PENDING = 40 # 与 save_history 里 history[-40:] 对齐
+
+# 缓冲持久化：避免 fly suspend 时丢数据
+PENDING_FILENAME = "pending.json"
+PENDING_FLUSH_THRESHOLD = 5 # 攒够这么多条立即写 gist
+PENDING_FLUSH_INTERVAL_SEC = 90 # 距上次刷盘超过这么久也写
+LAST_FLUSH_TIME = {} # {chat_id: epoch_seconds}
+LOADED_PENDING = set() # 哪些 chat_id 已从 gist 恢复过（冷启动懒加载用）
 
 # ============ 🌟 环境变量检查 ============
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -127,10 +135,10 @@ def load_history(chat_id):
         print(f"[ERROR] 读取历史崩了: {e}")
         return []
 
-def save_history(history, chat_id):
+def save_history(history, chat_id, pending_to_clear=False):
     gist_id = get_target_state_gist_id(chat_id)
     if not GIST_TOKEN or not gist_id: return
-        
+
     try:
         headers = {"Authorization": f"Bearer {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
@@ -141,17 +149,66 @@ def save_history(history, chat_id):
                 state = json.loads(content) if content.strip() else {}
             except:
                 state = {}
-            
+
         state["chat_history"] = history[-40:]
-        
+
+        files = {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}
+        # 原子性：把已落盘的 buffer 同时清空，避免下次冷启动重复合并
+        if pending_to_clear:
+            files[PENDING_FILENAME] = {"content": json.dumps({"pending": []}, ensure_ascii=False)}
+
         requests.patch(
             f"https://api.github.com/gists/{gist_id}",
             headers=headers,
-            json={"files": {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}},
+            json={"files": files},
             timeout=10
         )
     except Exception as e:
         print(f"[ERROR] 保存历史遭遇打击: {e}")
+
+def save_pending_to_gist(chat_id, pending_list):
+    """把旁听缓冲写到 gist 的 pending.json。失败只 print，不抛。"""
+    gist_id = get_target_state_gist_id(chat_id)
+    if not GIST_TOKEN or not gist_id: return
+    try:
+        headers = {"Authorization": f"Bearer {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        body = {"files": {PENDING_FILENAME: {"content": json.dumps({"pending": pending_list}, ensure_ascii=False, indent=2)}}}
+        r = requests.patch(f"https://api.github.com/gists/{gist_id}", headers=headers, json=body, timeout=10)
+        if r.status_code >= 300:
+            print(f"[ERROR] pending.json 写入失败 ({r.status_code}): {r.text[:120]}")
+        else:
+            print(f"[DEBUG] 💾 pending.json 已刷盘，{len(pending_list)} 条")
+    except Exception as e:
+        print(f"[ERROR] save_pending_to_gist 崩了: {e}")
+
+def load_pending_from_gist(chat_id):
+    """冷启动恢复用。返回 list，缺失/错误返回 []."""
+    gist_id = get_target_state_gist_id(chat_id)
+    if not GIST_TOKEN or not gist_id: return []
+    try:
+        headers = {"Authorization": f"Bearer {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+        if r.status_code != 200: return []
+        content = r.json().get("files", {}).get(PENDING_FILENAME, {}).get("content", "")
+        if not content.strip(): return []
+        return json.loads(content).get("pending", []) or []
+    except Exception as e:
+        print(f"[ERROR] load_pending_from_gist 崩了: {e}")
+        return []
+
+def flush_pending_if_due(chat_id):
+    """阈值或超时触发的 pending 刷盘。锁外做网络 IO。"""
+    with PENDING_LOCK:
+        buf = PENDING_MESSAGES.get(chat_id, [])
+        if not buf: return
+        last = LAST_FLUSH_TIME.get(chat_id, 0)
+        due_by_size = len(buf) >= PENDING_FLUSH_THRESHOLD
+        due_by_time = (time.time() - last) >= PENDING_FLUSH_INTERVAL_SEC
+        if not (due_by_size or due_by_time): return
+        snapshot = list(buf)
+    save_pending_to_gist(chat_id, snapshot)
+    with PENDING_LOCK:
+        LAST_FLUSH_TIME[chat_id] = time.time()
 
 def call_claude(user_message, memory, history, current_user_time, image_data_url=None):
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
@@ -312,13 +369,24 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         # 历史里只存文本占位，不存 base64（防止撑爆 Gist）
         msg_entry = {"role": "user", "content": formatted_input, "timestamp": u_time}
 
+        # 冷启动懒加载：第一次见到这个群时，把上一回合 SIGTERM 时悬空的缓冲拉回来
+        if is_group and chat_id not in LOADED_PENDING:
+            restored = load_pending_from_gist(chat_id)
+            with PENDING_LOCK:
+                if restored:
+                    PENDING_MESSAGES.setdefault(chat_id, []).extend(restored)
+                    print(f"[DEBUG] ♻️ 从 gist 恢复 {len(restored)} 条 pending。")
+                LOADED_PENDING.add(chat_id)
+
         # 群聊：先把每一句都压进旁听缓冲（含本句），不论是否触发
         if is_group:
             with PENDING_LOCK:
                 buf = PENDING_MESSAGES.setdefault(chat_id, [])
                 buf.append(msg_entry)
                 if len(buf) > MAX_PENDING:
-                    del buf[:len(buf) - MAX_PENDING]
+                    overflow = len(buf) - MAX_PENDING
+                    print(f"[WARN] 缓冲溢出，丢弃 {overflow} 条最早消息（chat={chat_id}）")
+                    del buf[:overflow]
 
         # ==========================================
         # 🎯 社交牛逼症引擎：加装 60秒 CD 锁
@@ -340,9 +408,11 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
             else:
                 print(f"[DEBUG] 🛑 还在 {COOLDOWN_TIME} 秒冷却期内，强制捂住它的嘴。")
 
-        # 🛡️ 旁听模式：消息已入内存缓冲，不碰 GitHub API
+        # 🛡️ 旁听模式：消息已入内存缓冲，触发阈值/超时则刷盘到 pending.json
         if not should_reply:
             print(f"[DEBUG] 🤫 旁听模式，暂不回复 {sender_name} 的发言。")
+            if is_group:
+                flush_pending_if_due(chat_id)
             return
 
         print(f"[DEBUG] 🗣️ Bot 被唤醒！开始燃烧老公的算力...")
@@ -351,12 +421,14 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         memory = fetch_memory()
         history = load_history(chat_id)
 
-        # 合并旁听缓冲（群聊）或直接追加当前消息（私聊）
+        # 合并旁听缓冲（群聊：copy-then-trim，不 pop——避免 Claude 调用期间被 SIGKILL 丢消息）
+        snapshot_len = 0
         if is_group:
             with PENDING_LOCK:
-                pending = PENDING_MESSAGES.pop(chat_id, [])
-            history.extend(pending)
-            print(f"[DEBUG] 📥 合并 {len(pending)} 条旁听消息进 history。")
+                snapshot = list(PENDING_MESSAGES.get(chat_id, []))
+                snapshot_len = len(snapshot)
+            history.extend(snapshot)
+            print(f"[DEBUG] 📥 合并 {snapshot_len} 条旁听消息进 history。")
         else:
             history.append(msg_entry)
 
@@ -387,8 +459,15 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "assistant", "content": reply, "timestamp": b_time})
 
-        # 💾 只有在真正开口说话的这一刻，才进行一次极其珍贵的 GitHub 存档！
-        save_history(history, chat_id)
+        # 💾 单次 PATCH 同时写 state.json 和清空 pending.json，避免中间态
+        save_history(history, chat_id, pending_to_clear=is_group)
+
+        # gist 已落盘，回头清掉本地缓冲里"已落盘的前 snapshot_len 条"，保留期间新进的
+        if is_group:
+            with PENDING_LOCK:
+                buf = PENDING_MESSAGES.get(chat_id, [])
+                del buf[:snapshot_len]
+                LAST_FLUSH_TIME[chat_id] = time.time() # 等同于刚刚刷过盘
 
     except Exception as e:
         import traceback
@@ -430,6 +509,10 @@ def webhook():
         elif BOT_USERNAME:
             user_text = user_text.replace(f"@{BOT_USERNAME}", "").strip()
 
+    # 群聊有图必触发：图片不入 history，错过这次就再也读不到了
+    if photos and chat_id.startswith("-"):
+        should_reply = True
+
     # 图片下载放在 webhook 同步路径里没问题，Telegram 给 webhook 大约 60s 超时
     image_data_url = None
     if photos:
@@ -447,6 +530,30 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health(): return "alive"
+
+# ============ SIGTERM 兜底：fly autostop 前把所有 pending 紧急刷盘 ============
+def _flush_all_on_signal(signum, frame):
+    print(f"[DEBUG] 🚨 收到信号 {signum}，紧急刷 pending...")
+    for cid in list(PENDING_MESSAGES.keys()):
+        try:
+            if PENDING_LOCK.acquire(timeout=2):
+                try:
+                    snapshot = list(PENDING_MESSAGES.get(cid, []))
+                finally:
+                    PENDING_LOCK.release()
+                if snapshot:
+                    save_pending_to_gist(cid, snapshot)
+            else:
+                print(f"[WARN] {cid} 拿不到锁，放弃这条")
+        except Exception as e:
+            print(f"[ERROR] 信号刷盘失败 {cid}: {e}")
+
+try:
+    signal.signal(signal.SIGTERM, _flush_all_on_signal)
+    signal.signal(signal.SIGINT, _flush_all_on_signal)
+except (ValueError, OSError) as e:
+    # 非主线程或 gunicorn 已经接管时会失败，best-effort
+    print(f"[WARN] 信号处理器注册失败: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
